@@ -76,6 +76,10 @@ function authRequired(req, res, next) {
   try { req.auth = jwt.verify(token, jwtSecret, { issuer: 'neresq-api' }); next(); }
   catch { return res.status(401).json({ message: 'Your session has expired. Please sign in again.' }); }
 }
+function operatorRequired(req, res, next) {
+  if (req.auth?.role !== 'operator') return res.status(403).json({ message: 'Guest accounts have view-only access.' });
+  next();
+}
 
 app.use(helmet());
 app.use(cors({ origin: allowedOrigin === '*' ? '*' : allowedOrigin.split(',').map(item => item.trim()) }));
@@ -96,6 +100,11 @@ app.post('/api/auth/login', loginRateLimit, async (req, res) => {
   if (!accepted) { req.loginAttempt.count += 1; attempts.set(req.ip, req.loginAttempt); return res.status(401).json({ message: 'Email or password is incorrect.' }); }
   attempts.delete(req.ip); res.json({ token: issueToken(user), user: publicUser(user) });
 });
+app.post('/api/auth/guest', loginRateLimit, (req, res) => {
+  const guest = { id: crypto.randomUUID(), email: 'guest@neresq.local', name: 'Guest Viewer', role: 'guest' };
+  const token = jwt.sign({ sub: guest.id, email: guest.email, role: guest.role }, jwtSecret, { expiresIn: '2h', issuer: 'neresq-api' });
+  res.json({ token, user: publicUser(guest) });
+});
 app.get('/api/auth/me', authRequired, (req, res) => { const user = [...users.values()].find(item => item.id === req.auth.sub); if (!user) return res.status(404).json({ message: 'Account not found.' }); res.json({ user: publicUser(user) }); });
 
 app.get('/api/map', authRequired, (_req, res) => res.json(operationalData.map));
@@ -105,13 +114,13 @@ app.get('/api/rescue-teams', authRequired, (_req, res) => res.json({ teams: oper
 app.get('/api/analytics', authRequired, (_req, res) => res.json(operationalData.analytics));
 app.get('/api/reports', authRequired, (_req, res) => res.json({ reports: operationalData.reports }));
 app.get('/api/settings', authRequired, (_req, res) => res.json(operationalData.settings));
-app.post('/api/reports', authRequired, (req, res) => {
+app.post('/api/reports', authRequired, operatorRequired, (req, res) => {
   const title = String(req.body.title || '').trim(), district = String(req.body.district || '').trim(), details = String(req.body.details || '').trim();
   if (!title || !district || !details) return res.status(400).json({ message: 'Title, district, and incident details are required.' });
   const report = { id: `RPT-${String(operationalData.reports.length + 9).padStart(3, '0')}`, title: title.slice(0, 100), district: district.slice(0, 100), details: details.slice(0, 500), priority: 'New', status: 'Received', createdAt: new Date().toLocaleString('en-IN') };
   operationalData.reports.unshift(report); res.status(201).json({ report });
 });
-app.patch('/api/settings', authRequired, (req, res) => { ['rainfallAlertThreshold', 'soilSaturationThreshold', 'notificationsEnabled', 'rainfallAnimationEnabled'].forEach(field => { if (field in req.body) operationalData.settings[field] = req.body[field]; }); res.json(operationalData.settings); });
+app.patch('/api/settings', authRequired, operatorRequired, (req, res) => { ['rainfallAlertThreshold', 'soilSaturationThreshold', 'notificationsEnabled', 'rainfallAnimationEnabled'].forEach(field => { if (field in req.body) operationalData.settings[field] = req.body[field]; }); res.json(operationalData.settings); });
 
 loadUsers();
 seedInitialOperator().then(() => app.listen(port, () => console.log(`NEResq API is running on port ${port}`)));
